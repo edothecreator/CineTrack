@@ -1,0 +1,429 @@
+================================================================================
+  CINETRACK — PROJECT OVERVIEW
+  Next.js 16 · React 19 · Tailwind v4 · Prisma 6 · PostgreSQL (Supabase)
+================================================================================
+
+THEME
+-----
+- Product name: "CineTrack" — premium cinematic identity system.
+- Visual direction: dark-first (#0B0B0F), gold accent (#F5C542), purple accent
+  (#A78BFA), glassmorphism surfaces, cinematic hero imagery, Framer Motion.
+- Light/dark theming via CSS variables and next-themes (defaults to dark).
+- Data source: TMDB API v3 — Bearer token, server-side only.
+  All TMDB logic centralized in src/lib/server/tmdb.ts.
+
+
+TECH STACK
+----------
+  Framework:    Next.js 16.2.1 (App Router)
+  UI:           React 19, Tailwind CSS v4, Lucide React, Framer Motion
+  Database:     PostgreSQL via Prisma ORM (Supabase)
+  Auth:         JWT + HTTP-only cookies, bcryptjs
+  Deployment:   Vercel + Supabase
+  CI/CD:        GitLab CI (validate → build → test → security → docker → deploy)
+
+
+ENVIRONMENT VARIABLES
+---------------------
+  DATABASE_URL            Supabase pooled (port 6543, pgbouncer)
+  DIRECT_URL              Supabase direct (port 5432, migrations)
+  AUTH_SECRET             JWT signing secret
+  TMDB_API_READ_TOKEN     TMDB v4 Read Access Token (Bearer)
+
+
+================================================================================
+  BRAND LANGUAGE (RENAMED CONCEPTS)
+================================================================================
+
+  Posts       → Scenes
+  Comments    → Resonance
+  Reactions   → Signals  (❤️ Love · 🔥 Fire · 😮 Wow · 😢 Sad · 😂 Haha)
+  Feed        → Stream   (Following / Trending / Global tabs)
+  Leaderboard → Hall of Fame
+  Profile     → Archive
+  Browse      → Discover
+  My list     → Archive
+
+
+================================================================================
+  FUNCTIONALITIES
+================================================================================
+
+HOME (/)
+--------
+- Hero carousel: auto-rotating spotlight, parallax mouse effect, backdrop images.
+- Trending / Popular rail toggle with animated tab indicator.
+- Vibe genre filter chips (Action, Sci-Fi, Comedy, Crime, Animation).
+- Mobile horizontal scroll + desktop grid.
+- Data: GET /api/home-discovery (TMDB trending + popular).
+
+DISCOVER (/search)
+------------------
+- Debounced TMDB multi-search (movies + TV).
+- Grid / list view toggle.
+- Infinite scroll on results (Intersection Observer).
+- Empty query shows trending defaults.
+
+TITLE DETAIL (/movie/[id])
+--------------------------
+- IDs: movie-{tmdbId} / tv-{tmdbId}.
+- Full TMDB data: poster, backdrop, synopsis, tagline, rating + vote count,
+  runtime, genres, status, budget, box office, original language, keywords,
+  production countries, spoken languages, studios, networks, content rating.
+- Filmmakers section: created by, directors, writers (linked to person pages).
+- Cast grid with photos, linked to person pages.
+- Trailers (YouTube links).
+- Watch providers (streaming badges, US region).
+- Episode tracker for TV series.
+- Community stats: watched count, in-list count, avg user rating, recent scenes.
+- Action buttons: Save to list, Mark as watched (with rating modal),
+  Drop a Scene (pre-filled composer), Add to Collection.
+- OpenGraph meta tags for social sharing.
+
+EPISODE TRACKER (SeriesEpisodeTracker)
+--------------------------------------
+- Season tabs with per-season watched/total counter.
+- Episode stills from TMDB, rating, runtime, air date per row.
+- Spoiler shield per episode (auto-revealed when marked watched).
+- Expandable overview with More/Less toggle.
+- "Mark all Season X as watched" quick action.
+- Progress bar for overall series completion.
+
+WATCHLIST / ARCHIVE (/my-list, /watchlist)
+------------------------------------------
+- Titles queued to watch. Search within list.
+- Release radar section for upcoming titles.
+- Surprise Roulette random picker.
+- Guest mode: localStorage, merged on login.
+
+WATCHED HISTORY (/watched, /history)
+-------------------------------------
+- Titles marked as done. Search within history.
+- Per-card user rating display (click to remove, "+ Rate" to quick-rate).
+- Remove from history button.
+
+USER RATINGS
+------------
+- Personal 1–10 star rating stored on WatchedTitle.userRating.
+- Rating modal when marking as watched (optional, can skip).
+- Re-rate from detail page sidebar or history grid.
+- Feeds into community avg rating and Taste Match calculation.
+
+COLLECTIONS (/collections)
+---------------------------
+- Named user lists (max 20 lists, max 500 items each).
+- Create / rename / delete collections.
+- Public or private toggle per collection.
+- Add to Collection button on every title detail page.
+- Collection detail page with poster grid, remove items.
+
+SOCIAL SYSTEM
+-------------
+Follow / Unfollow
+  - POST /api/users/[username]/follow
+  - Mutual follow detection, NEW_FOLLOWER + FOLLOW_BACK notifications.
+
+Stream (/feed) — 3 tabs:
+  Following  — scenes from followed users (auth required)
+  Trending   — most signalled scenes in last 7 days
+  Global     — all scenes newest first
+  Infinite scroll on all tabs.
+
+Scenes (Posts)
+  - Types: MEDIA (linked to TMDB title), TEXT (pure take), IMAGE (with caption).
+  - Fields: text, rating, isSpoiler, takeType (hot/fact/question).
+  - Drop a Scene from the Stream page composer OR directly from any title page.
+  - @mention support: parses @username, sends SCENE_MENTION notification,
+    renders as clickable links in scene text.
+
+Signals (Reactions)
+  - 5 types: love ❤️, fire 🔥, wow 😮, sad 😢, haha 😂.
+  - One per user per scene, toggleable, optimistic UI.
+  - Triggers SCENE_REACTION notification to scene author.
+
+Resonance (Comments)
+  - Threaded 1 level (replies to top-level comments).
+  - Triggers SCENE_COMMENT notification to scene author.
+
+Notifications
+  - Bell in header with unread count badge, polls every 60s.
+  - Types: NEW_FOLLOWER, FOLLOW_BACK, FRIEND_WATCHED, FRIEND_ADDED_LIST,
+           SCENE_REACTION, SCENE_COMMENT, SCENE_MENTION.
+  - Mark all read on open.
+
+User Search
+  - GET /api/users/search?q= — by username or display name.
+  - UserSearch component in desktop header.
+
+Public Profiles (/user/[username])
+  - Avatar, display name, bio, follower/following counts.
+  - Taste Match % badge (inline + card with arc progress).
+  - Recently watched grid.
+  - Follow button.
+  - Privacy: private profiles locked to non-followers.
+  - OpenGraph meta tags.
+
+Followers / Following lists (/user/[username]/followers|following)
+
+Own Profile / Archive (/profile)
+  - Edit bio, avatar, display name, banner, public/private toggle.
+  - Tabs: Overview (stats, binge clock, recent activity, quick links),
+          Stats & DNA (genre fingerprint, completion rate, streak),
+          Settings (avatar, bio, data export).
+  - Data export: JSON or CSV download of watched history + watchlist + collections.
+
+TASTE MATCH
+-----------
+- Computed between viewer and any other user.
+- Algorithm: 40% watch overlap (Jaccard) + 40% rating correlation (Pearson)
+  + 20% genre affinity (cosine similarity). Returns 0–100%.
+- API: GET /api/users/[username]/taste-match (auth required, cached 5 min).
+- Displayed as inline badge + animated arc card on public profiles.
+
+PERSON PAGES (/person/[id])
+----------------------------
+- TMDB person detail: photo, name, credits list.
+- Overlap badge: "You've seen X% of catalogued roles".
+
+HALL OF FAME (/pantheon)
+------------------------
+- Top rated movies + TV from TMDB, paginated (20/page, up to rank 100).
+- Top 3 get medal emojis + gold/silver/bronze treatment.
+- Client-side page cache.
+
+COMMUNITY STATS (TitleCommunityStats)
+--------------------------------------
+- Per-title: watched count, in-list count, avg user rating, recent scenes (30d).
+- Shown in left sidebar of every title detail page.
+- API: GET /api/title-stats?id={tmdbId} (cached 60s).
+
+STATS
+-----
+- Binge Clock: POST /api/binge-stats — aggregates TMDB runtimes.
+- Watching DNA: POST /api/watching-dna — top genres, completion rate,
+  total watch minutes, longest binge streak.
+
+AUTHENTICATION
+--------------
+- JWT in HTTP-only cookie (AUTH_SECRET).
+- Register / Login / Logout / Session / Bootstrap.
+- Guest mode: full app usable without account (localStorage).
+- Guest merge on login: POST /api/me/merge-guest.
+
+INFRASTRUCTURE (Session 5)
+--------------------------
+- OpenGraph + Twitter Card meta tags on title pages and user profiles.
+- Data export: GET /api/me/export?format=json|csv.
+- Infinite scroll: Intersection Observer hook (src/hooks/useInfiniteScroll.ts)
+  used on Stream feed and Discover search results.
+- Rate limiting: not yet implemented (planned: Upstash Redis).
+
+
+================================================================================
+  FILE MAP
+================================================================================
+
+PAGES (src/app/)
+----------------
+  page.tsx                              Home
+  search/page.tsx                       Discover
+  movie/[id]/page.tsx                   Title detail (OG tags)
+  person/[id]/page.tsx                  Person / actor
+  pantheon/page.tsx                     Hall of Fame
+  feed/page.tsx                         Stream (Following/Trending/Global)
+  collections/page.tsx                  Collections list
+  collections/[id]/page.tsx             Collection detail
+  profile/page.tsx                      Own profile / Archive
+  user/[username]/page.tsx              Public profile (OG tags + Taste Match)
+  user/[username]/followers/page.tsx
+  user/[username]/following/page.tsx
+  watchlist/page.tsx                    Archive (alias)
+  my-list/page.tsx                      Archive
+  watched/page.tsx                      Watched history (alias)
+  history/page.tsx                      Watched history
+  login/page.tsx
+  signup/page.tsx
+  register/page.tsx                     Redirect to /signup
+  not-found.tsx
+
+API ROUTES (src/app/api/)
+--------------------------
+  search-movie/route.ts                 GET  — TMDB search / browse defaults
+  home-discovery/route.ts               GET  — Trending + popular
+  series-episodes/route.ts              GET  — TV season episodes
+  binge-stats/route.ts                  POST — Aggregate runtimes
+  watching-dna/route.ts                 POST — Genre insights + streak
+  pantheon/route.ts                     GET  — Top rated paginated
+  person/[id]/route.ts                  GET  — Person detail + credits
+  title-stats/route.ts                  GET  — Community stats per title
+
+  auth/login/route.ts                   POST
+  auth/register/route.ts                POST
+  auth/logout/route.ts                  POST
+  auth/me/route.ts                      GET
+
+  me/route.ts                           GET  — Full bootstrap
+  me/watchlist/route.ts                 POST — Add/remove
+  me/history/route.ts                   POST — Mark watched / remove
+  me/episodes/route.ts                  POST — Toggle episode
+  me/profile/route.ts                   PATCH
+  me/rate/route.ts                      POST — Set/clear user rating
+  me/feed/route.ts                      GET  — Activity feed (legacy)
+  me/notifications/route.ts             GET/POST
+  me/merge-guest/route.ts               POST
+  me/export/route.ts                    GET  — JSON or CSV export
+  me/lists/route.ts                     GET/POST — Collections
+  me/lists/[id]/route.ts                GET/PATCH/DELETE
+  me/lists/[id]/items/route.ts          POST — Add/remove item
+
+  posts/route.ts                        GET/POST — Stream feed + create scene
+  posts/global/route.ts                 GET  — Global/trending scenes
+  posts/[id]/route.ts                   GET/DELETE
+  posts/[id]/reactions/route.ts         POST — Toggle signal
+  posts/[id]/comments/route.ts          POST — Add resonance
+  posts/[id]/comments/[commentId]/route.ts  DELETE
+
+  users/search/route.ts                 GET
+  users/[username]/route.ts             GET  — Public profile
+  users/[username]/follow/route.ts      POST
+  users/[username]/followers/route.ts   GET
+  users/[username]/following/route.ts   GET
+  users/[username]/posts/route.ts       GET  — User's scenes
+  users/[username]/taste-match/route.ts GET  — Taste Match %
+
+SERVER LIBS (src/lib/server/)
+------------------------------
+  tmdb.ts                               TMDB API service (all TMDB calls)
+  prisma.ts                             Prisma singleton
+  auth/cookieOptions.ts
+  auth/crypto.ts
+  auth/password.ts
+  auth/session.ts
+  auth/sessionServer.ts
+  auth/usersPrisma.ts
+  me/libraryService.ts                  Watchlist/history/episodes/ratings DB ops
+  social/socialService.ts               Follow, feed, notifications
+  social/postService.ts                 Scenes, signals, resonance, global feed
+  social/tasteMatch.ts                  Taste Match algorithm
+
+CLIENT LIBS (src/lib/)
+-----------------------
+  movieQueries.ts
+  searchMovieClient.ts
+  homeDiscoveryClient.ts
+  searchMovieContract.ts
+  homeDiscoveryContract.ts
+  formatMovie.ts
+  bingeClock.ts
+  vibeFilters.ts                        TMDB genre IDs
+  motionPresets.ts
+  movieGuards.ts                        HistoryEntry type (includes userRating)
+  watchedStorage.ts
+
+HOOKS (src/hooks/)
+------------------
+  useInfiniteScroll.ts                  Intersection Observer infinite scroll
+
+COMPONENTS (src/components/)
+-----------------------------
+  SiteHeader.tsx                        Sticky nav (Discover/Stream/Archive/Collections/Hall of Fame)
+  UserNav.tsx
+  MobileBottomNav.tsx                   Stream/Discover/Archive/Hall/Profile
+  ThemeToggle.tsx
+  DynamicBackground.tsx
+  PageTransition.tsx
+  Providers.tsx
+  AuthPageLayout.tsx
+  PrivateRouteGate.tsx
+
+  MovieCard.tsx                         3D tilt poster card
+  SearchBar.tsx
+  SearchResults.tsx                     Grid/list + infinite scroll
+  HomeHeroCarousel.tsx
+  DiscoveryBento.tsx
+  MovieDetailView.tsx                   Full detail with all TMDB data
+
+  WatchedList.tsx                       Watchlist grid + search
+  HistoryList.tsx                       History grid + search + ratings
+  MarkWatchedButton.tsx                 WatchlistButton
+  MarkDoneButton.tsx                    Rating modal + confirm
+  StarRating.tsx                        Interactive 10-star picker (3 sizes)
+  SeriesEpisodeTracker.tsx              Season tabs + episode stills
+  BingeClockCard.tsx
+  TitleCommunityStats.tsx               Watched/list/rating/scenes stats
+  AddToCollectionButton.tsx             Dropdown to add title to a collection
+  DropSceneButton.tsx                   Pre-filled scene composer from title page
+
+  ProfileView.tsx                       Own profile (tabs: overview/stats/settings)
+  PersonView.tsx
+  FollowButton.tsx
+  UserSearch.tsx
+  NotificationBell.tsx                  All 7 notification types
+  TasteMatchBadge.tsx                   Inline pill + arc card variants
+
+  PostCard.tsx                          Scene card (@mention links, spoiler shield)
+  PostComposer.tsx                      Scene composer (text/media/image tabs)
+  LibrarySearch.tsx                     Search input for watchlist/history
+
+  PremiereCountdown.tsx
+  SurpriseRoulette.tsx
+  Skeletons.tsx
+
+CONTEXTS (src/context/)
+------------------------
+  AuthContext.tsx                       Auth + watchlist + history + episodes +
+                                        ratings (getUserRating, rateTitle) +
+                                        guest mode
+  HoverContext.tsx
+  WatchedContext.tsx
+
+TYPES (src/types/)
+-------------------
+  movie.ts          MovieSummary, MovieDetail, CastMember, CrewMember,
+                    SeasonInfo, WatchProvider
+  person.ts         PersonPublicDetail, PersonCredit
+  library.ts        SeriesEpisodeWatchMap
+  meBootstrap.ts    MeBootstrap
+  social.ts         PublicProfile, ActivityItem, NotificationItem (7 types),
+                    FollowState
+  post.ts           PostItem, PostType, ReactionType, CommentItem,
+                    CreatePostInput, REACTION_META
+
+DATABASE (prisma/)
+------------------
+  schema.prisma     Models: User, WatchlistItem, WatchedTitle (+ userRating),
+                    EpisodeMark, UserFollow, Activity, Notification,
+                    Post, Reaction, Comment, UserList, UserListItem
+                    Enums: ActivityType, NotificationType (7 values),
+                    PostType, MediaType, TakeType, ReactionType
+
+  migrations/
+    20260327120000_init/          Initial schema
+    20260510000000_social/        Social features
+    20260510100000_posts/         Scenes, signals, resonance
+    20260511000000_user_ratings/  userRating + SCENE_REACTION/COMMENT notifs
+    20260511100000_mention_notif/ SCENE_MENTION notification type
+    20260512000000_user_lists/    UserList + UserListItem (Collections)
+
+CONFIG
+------
+  next.config.ts        Image domains: image.tmdb.org, placehold.co
+  .env.example          Required env vars template
+  docker-compose.yml    Local Postgres + app
+  Dockerfile            Multi-stage production image
+  .gitlab-ci.yml        Full 6-stage CI/CD pipeline
+
+
+================================================================================
+  ID SYSTEM
+================================================================================
+  movie-{tmdbId}    Movies    e.g. movie-550  (Fight Club)
+  tv-{tmdbId}       TV shows  e.g. tv-1396   (Breaking Bad)
+
+  Used as primary keys in watchlist/history/episode tracking,
+  URL slugs in /movie/[id], and tmdbId in Post/UserListItem.
+
+
+================================================================================
+  END OF OVERVIEW
+================================================================================
