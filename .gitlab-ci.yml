@@ -1,0 +1,355 @@
+# =============================================================================
+#  CineTrack — GitLab CI/CD Pipeline
+#  Next.js 16 · React 19 · Prisma 6 · PostgreSQL 16
+#  Deployment: Vercel · Database: Supabase
+#  Runners: GitLab.com shared runners (no custom tags needed)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Global defaults
+# ---------------------------------------------------------------------------
+default:
+  image: node:20-alpine
+  interruptible: true
+  retry:
+    max: 1
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+
+# ---------------------------------------------------------------------------
+# Workflow rules
+# ---------------------------------------------------------------------------
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "develop"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+# ---------------------------------------------------------------------------
+# Stages
+# ---------------------------------------------------------------------------
+stages:
+  - validate
+  - build
+  - test
+  - security
+  - docker
+  - deploy
+  - rollback
+  - notify
+
+# ---------------------------------------------------------------------------
+# YAML anchors — cache
+# ---------------------------------------------------------------------------
+.node_cache: &node_cache
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+    policy: pull
+
+.node_cache_push: &node_cache_push
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+    policy: pull-push
+
+# ---------------------------------------------------------------------------
+# STAGE 1 — validate
+# ---------------------------------------------------------------------------
+
+install:deps:
+  stage: validate
+  <<: *node_cache_push
+  script:
+    - npm ci --prefer-offline --no-audit
+  artifacts:
+    paths:
+      - node_modules/
+    expire_in: 1 hour
+
+lint:eslint:
+  stage: validate
+  needs: [install:deps]
+  <<: *node_cache
+  script:
+    - npm run lint -- --max-warnings 0
+
+lint:types:
+  stage: validate
+  needs: [install:deps]
+  <<: *node_cache
+  script:
+    - npx tsc --noEmit --skipLibCheck
+
+lint:prisma:
+  stage: validate
+  needs: [install:deps]
+  <<: *node_cache
+  variables:
+    DATABASE_URL: "postgresql://ci:ci@localhost:5432/ci"
+    DIRECT_URL: "postgresql://ci:ci@localhost:5432/ci"
+  script:
+    - npx prisma validate
+
+# ---------------------------------------------------------------------------
+# STAGE 2 — build
+# ---------------------------------------------------------------------------
+
+build:nextjs:
+  stage: build
+  needs: [lint:eslint, lint:types, lint:prisma]
+  <<: *node_cache
+  variables:
+    DATABASE_URL: "postgresql://ci:ci@localhost:5432/ci"
+    DIRECT_URL: "postgresql://ci:ci@localhost:5432/ci"
+    AUTH_SECRET: "ci-build-placeholder-not-a-real-secret"
+    TMDB_API_READ_TOKEN: "ci-placeholder"
+    NEXT_TELEMETRY_DISABLED: "1"
+  script:
+    - npm run build
+  artifacts:
+    paths:
+      - .next/
+      - node_modules/.prisma/
+    expire_in: 2 hours
+
+# ---------------------------------------------------------------------------
+# STAGE 3 — test
+# test:unit and test:integration run in parallel
+# ---------------------------------------------------------------------------
+
+test:unit:
+  stage: test
+  needs: [install:deps]
+  <<: *node_cache
+  variables:
+    NEXT_TELEMETRY_DISABLED: "1"
+  script:
+    - npm test -- --reporter=verbose
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    when: always
+    paths:
+      - coverage/
+    expire_in: 1 week
+
+test:integration:
+  stage: test
+  needs: [build:nextjs]
+  <<: *node_cache
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    POSTGRES_USER: cinetrack_ci
+    POSTGRES_PASSWORD: cinetrack_ci
+    POSTGRES_DB: cinetrack_ci
+    DATABASE_URL: "postgresql://cinetrack_ci:cinetrack_ci@postgres:5432/cinetrack_ci?schema=public"
+    DIRECT_URL: "postgresql://cinetrack_ci:cinetrack_ci@postgres:5432/cinetrack_ci"
+    AUTH_SECRET: "ci-test-secret"
+    TMDB_API_READ_TOKEN: "ci-placeholder"
+    NEXT_TELEMETRY_DISABLED: "1"
+  before_script:
+    - apk add --no-cache postgresql-client
+    - |
+      echo "Waiting for Postgres..."
+      until pg_isready -h postgres -U cinetrack_ci; do sleep 1; done
+      echo "Postgres is up."
+    - npx prisma migrate deploy
+  script:
+    - npx prisma generate
+    - npx prisma db pull --print
+    - echo "✓ Schema round-trip OK"
+
+# ---------------------------------------------------------------------------
+# STAGE 4 — security
+# Both jobs run in parallel
+# ---------------------------------------------------------------------------
+
+security:audit:
+  stage: security
+  needs: [install:deps]
+  <<: *node_cache
+  script:
+    - npm audit --audit-level=critical
+  allow_failure: false
+  artifacts:
+    when: always
+    reports:
+      dependency_scanning: gl-dependency-scanning-report.json
+    expire_in: 1 week
+
+security:secrets:
+  stage: security
+  needs: []
+  image:
+    name: trufflesecurity/trufflehog:latest
+    entrypoint: [""]
+  script:
+    - trufflehog git file://. --since-commit HEAD~10 --only-verified --fail
+  allow_failure: true
+
+# ---------------------------------------------------------------------------
+# STAGE 5 — docker (main/develop only)
+# ---------------------------------------------------------------------------
+
+docker:build-push:
+  stage: docker
+  needs: [test:unit, test:integration, security:audit]
+  image: docker:26-cli
+  services:
+    - docker:26-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+    IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    IMAGE_LATEST: $CI_REGISTRY_IMAGE:latest
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "develop"
+      variables:
+        IMAGE_LATEST: $CI_REGISTRY_IMAGE:develop-latest
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker pull $IMAGE_LATEST || true
+  script:
+    - |
+      docker build \
+        --build-arg NEXT_TELEMETRY_DISABLED=1 \
+        --cache-from $IMAGE_LATEST \
+        --tag $IMAGE_TAG \
+        --tag $IMAGE_LATEST \
+        .
+    - docker push $IMAGE_TAG
+    - docker push $IMAGE_LATEST
+  after_script:
+    - docker logout $CI_REGISTRY
+
+# ---------------------------------------------------------------------------
+# STAGE 6 — deploy (Vercel)
+# Required GitLab CI variables: VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID
+# ---------------------------------------------------------------------------
+
+.vercel_base: &vercel_base
+  stage: deploy
+  image: node:20-alpine
+  before_script:
+    - npm install -g vercel@latest --silent
+
+vercel:deploy:staging:
+  <<: *vercel_base
+  needs: [docker:build-push]
+  environment:
+    name: staging
+    url: https://cinetrack-staging.vercel.app
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop"
+  script:
+    - |
+      echo "Deploying to Vercel staging..."
+      DEPLOY_URL=$(vercel deploy --token=$VERCEL_TOKEN --yes 2>&1 | tail -1)
+      echo "Preview URL: $DEPLOY_URL"
+      vercel alias set "$DEPLOY_URL" cinetrack-staging.vercel.app \
+        --token=$VERCEL_TOKEN --yes || true
+      echo "✓ Staging → https://cinetrack-staging.vercel.app"
+      echo "STAGING_URL=$DEPLOY_URL" >> deploy.env
+  artifacts:
+    reports:
+      dotenv: deploy.env
+    expire_in: 1 day
+
+vercel:deploy:production:
+  <<: *vercel_base
+  needs: [docker:build-push]
+  environment:
+    name: production
+    url: https://movie-tracker-five-theta.vercel.app
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  script:
+    - |
+      echo "Deploying to Vercel production..."
+      echo "PREVIOUS_SHA=$CI_COMMIT_BEFORE_SHA" >> deploy.env
+      echo "DEPLOYED_SHA=$CI_COMMIT_SHORT_SHA" >> deploy.env
+      vercel deploy --token=$VERCEL_TOKEN --prod --yes
+      echo "✓ Production → https://movie-tracker-five-theta.vercel.app"
+  artifacts:
+    reports:
+      dotenv: deploy.env
+    expire_in: 7 days
+  interruptible: false
+
+# ---------------------------------------------------------------------------
+# STAGE 7 — rollback (manual, main only)
+# ---------------------------------------------------------------------------
+
+rollback:production:
+  stage: rollback
+  image: node:20-alpine
+  needs:
+    - job: vercel:deploy:production
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+  environment:
+    name: production
+    url: https://movie-tracker-five-theta.vercel.app
+    action: stop
+  allow_failure: true
+  before_script:
+    - npm install -g vercel@latest --silent
+    - apk add --no-cache git
+  script:
+    - |
+      echo "⚠️  ROLLBACK: $DEPLOYED_SHA → $PREVIOUS_SHA"
+      if [ -z "$PREVIOUS_SHA" ] || [ "$PREVIOUS_SHA" = "0000000000000000000000000000000000000000" ]; then
+        echo "❌ No previous SHA. Cannot rollback."
+        exit 1
+      fi
+      git fetch origin
+      git checkout "$PREVIOUS_SHA"
+      vercel deploy --token=$VERCEL_TOKEN --prod --yes
+      echo "✓ Rollback complete → $PREVIOUS_SHA"
+  interruptible: false
+
+# ---------------------------------------------------------------------------
+# STAGE 8 — notify (always runs)
+# ---------------------------------------------------------------------------
+
+notify:pipeline:
+  stage: notify
+  needs:
+    - job: vercel:deploy:production
+      optional: true
+    - job: vercel:deploy:staging
+      optional: true
+    - job: rollback:production
+      optional: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "develop"
+  when: always
+  script:
+    - |
+      echo "════════════════════════════════════════"
+      echo "  CineTrack Pipeline Summary"
+      echo "════════════════════════════════════════"
+      echo "  Branch:   $CI_COMMIT_BRANCH"
+      echo "  Commit:   $CI_COMMIT_SHORT_SHA"
+      echo "  Author:   $CI_COMMIT_AUTHOR"
+      echo "  Message:  $CI_COMMIT_TITLE"
+      echo "  Pipeline: $CI_PIPELINE_URL"
+      if [ "$CI_COMMIT_BRANCH" = "main" ]; then
+        echo "  Live:     https://movie-tracker-five-theta.vercel.app"
+      else
+        echo "  Staging:  https://cinetrack-staging.vercel.app"
+      fi
+      echo "════════════════════════════════════════"

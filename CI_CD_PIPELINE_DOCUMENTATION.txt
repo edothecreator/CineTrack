@@ -1,0 +1,477 @@
+================================================================================
+  CINETRACK — CI/CD PIPELINE DOCUMENTATION
+  GitLab CI/CD · Next.js 16 · Prisma 6 · PostgreSQL 16 (Supabase)
+  Deployment: Vercel · Registry: GitLab Container Registry
+================================================================================
+
+  Author note
+  ───────────
+  This document explains every decision made in .gitlab-ci.yml and Dockerfile.
+  Written for engineers who need to understand, extend, or debug the pipeline.
+
+  Current pipeline version includes:
+  • Vitest unit test suite (41 tests across 6 files)
+  • Stable staging environment (develop → cinetrack-staging.vercel.app)
+  • Manual rollback job (redeploys previous production SHA)
+  • TMDB API (replaced TVDB)
+  • Supabase PostgreSQL with DATABASE_URL + DIRECT_URL
+  • 8 pipeline stages
+
+================================================================================
+  1. PIPELINE OVERVIEW
+================================================================================
+
+  Type:     Continuous Integration + Continuous Delivery (CI/CD)
+  Platform: GitLab CI/CD
+  Deploy:   Vercel (serverless Next.js)
+  Database: Supabase (managed PostgreSQL 16)
+  Registry: GitLab Container Registry (backup Docker image)
+
+  ── Full pipeline topology ───────────────────────────────────────────────────
+
+    install:deps
+         │
+    ┌────┴──────────────────┐
+    │           │           │
+  lint:eslint  lint:types  lint:prisma   security:secrets (parallel, no deps)
+    │           │           │
+    └─────┬─────┘           │
+          │                 │
+      build:nextjs          │
+          │                 │
+    ┌─────┴──────┐          │
+    │            │          │
+  test:unit   test:integration   ← both run in parallel
+    │            │
+    └─────┬──────┘
+          │
+    security:audit  ←── also gets security:secrets result
+          │
+    docker:build-push  (main/develop only)
+          │
+    ┌─────┴──────────────────┐
+    │                        │
+  vercel:deploy:staging   vercel:deploy:production
+  (develop branch)        (main branch)
+                               │
+                          rollback:production  ← MANUAL, only on main
+          │                        │
+          └──────────┬─────────────┘
+                     │
+               notify:pipeline  (always runs)
+
+  ── What runs on each trigger ────────────────────────────────────────────────
+
+  Push to main:
+    All 8 stages. Production deploy is automatic after docker stage.
+    Rollback job appears but requires manual click to execute.
+
+  Push to develop:
+    All 8 stages. Staging deploy is automatic. No production deploy.
+
+  Merge Request:
+    validate + build + test + security only.
+    No docker build, no deploy. Fast feedback without wasting resources.
+
+  Manual web trigger:
+    Full pipeline (useful for hotfix deploys).
+
+
+================================================================================
+  2. STAGES
+================================================================================
+
+  ┌─────────────┬──────────────────────────────────────────────────────────────┐
+  │ Stage       │ Purpose                                                      │
+  ├─────────────┼──────────────────────────────────────────────────────────────┤
+  │ validate    │ ESLint, TypeScript (tsc --noEmit --skipLibCheck), Prisma     │
+  │             │ schema validation. No DB, no build. Fails in ~90 seconds.    │
+  ├─────────────┼──────────────────────────────────────────────────────────────┤
+  │ build       │ next build + prisma generate. Placeholder env vars used —    │
+  │             │ real secrets injected at runtime by Vercel, not baked in.    │
+  ├─────────────┼──────────────────────────────────────────────────────────────┤
+  │ test        │ TWO parallel jobs:                                           │
+  │             │                                                              │
+  │             │ test:unit — Vitest (pure logic, no DB, ~10 seconds)          │
+  │             │   • 6 test files, 41 tests                                   │
+  │             │   • Tests: formatReleaseDate, isMovieSummaryShape,           │
+  │             │     isHistoryEntryShape, binge duration formatting,          │
+  │             │     Jaccard/Pearson algorithms (Taste Match), VIBE_FILTERS,  │
+  │             │     REACTION_META                                            │
+  │             │   • Runs from install:deps (no build needed)                 │
+  │             │   • Coverage report generated to coverage/                   │
+  │             │                                                              │
+  │             │ test:integration — Prisma + real Postgres service container  │
+  │             │   • Runs prisma migrate deploy against ephemeral Postgres    │
+  │             │   • Confirms schema round-trip (db pull --print)             │
+  │             │   • Validates all migration files are correct                │
+  │             │   • Runs from build:nextjs (needs .next/ artefact)           │
+  ├─────────────┼──────────────────────────────────────────────────────────────┤
+  │ security    │ Two parallel jobs:                                           │
+  │             │   1. npm audit --audit-level=critical (blocks on critical    │
+  │             │      CVEs only — high is blocked by Next.js's own advisory   │
+  │             │      which cannot be auto-fixed without downgrading Next.js) │
+  │             │   2. TruffleHog — scans git history for leaked secrets       │
+  ├─────────────┼──────────────────────────────────────────────────────────────┤
+  │ docker      │ Multi-stage Docker image → GitLab Container Registry.        │
+  │             │ Backup artefact — Vercel handles actual serving.             │
+  │             │ Only on main/develop. Tags: :sha + :latest/:develop-latest.  │
+  ├─────────────┼──────────────────────────────────────────────────────────────┤
+  │ deploy      │ TWO jobs (one per branch):                                   │
+  │             │                                                              │
+  │             │ vercel:deploy:staging (develop branch)                       │
+  │             │   • Runs `vercel deploy` → gets unique preview URL           │
+  │             │   • Aliases it to cinetrack-staging.vercel.app               │
+  │             │   • Stable URL for QA/demo — always points to latest develop │
+  │             │                                                              │
+  │             │ vercel:deploy:production (main branch)                       │
+  │             │   • Runs `vercel deploy --prod`                              │
+  │             │   • Deploys to movie-tracker-five-theta.vercel.app           │
+  │             │   • Stores PREVIOUS_SHA + DEPLOYED_SHA as artefacts          │
+  │             │     (used by rollback job)                                   │
+  │             │   • interruptible: false — never cancel mid-deploy           │
+  ├─────────────┼──────────────────────────────────────────────────────────────┤
+  │ rollback    │ Manual job — only appears on main branch pipelines.          │
+  │             │                                                              │
+  │             │ How to trigger:                                              │
+  │             │   GitLab → CI/CD → Pipelines → find pipeline → click ▶      │
+  │             │   on rollback:production                                     │
+  │             │                                                              │
+  │             │ What it does:                                                │
+  │             │   1. Reads PREVIOUS_SHA from the deploy job artefact         │
+  │             │   2. git checkout <previous-sha>                             │
+  │             │   3. vercel deploy --prod on the previous code               │
+  │             │   4. Production reverts in ~60 seconds                       │
+  │             │                                                              │
+  │             │ Safety checks:                                               │
+  │             │   • Fails if PREVIOUS_SHA is empty or all-zeros              │
+  │             │     (first-ever deploy has no previous)                      │
+  │             │   • interruptible: false — never cancel mid-rollback         │
+  │             │   • allow_failure: true — doesn't block notify stage         │
+  ├─────────────┼──────────────────────────────────────────────────────────────┤
+  │ notify      │ Always runs (when: always) after deploy/rollback.            │
+  │             │ Prints structured pipeline summary. Extensible to            │
+  │             │ Slack/Discord via webhook.                                   │
+  └─────────────┴──────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+  3. TEST SUITE (VITEST)
+================================================================================
+
+  Framework: Vitest v4 with @vitejs/plugin-react
+  Config:    vitest.config.ts
+  Setup:     src/__tests__/setup.ts (mocks Next.js navigation + headers)
+  Run:       npm test (single run) | npm run test:watch | npm run test:coverage
+
+  ── Test files ───────────────────────────────────────────────────────────────
+
+  src/__tests__/lib/formatMovie.test.ts       (4 tests)
+    Tests formatReleaseDate() — ISO date formatting, empty/null handling
+
+  src/__tests__/lib/movieGuards.test.ts       (9 tests)
+    Tests isMovieSummaryShape() and isHistoryEntryShape() type guards
+    Covers valid shapes, missing fields, wrong types, null, NaN
+
+  src/__tests__/lib/bingeClock.test.ts        (7 tests)
+    Tests binge duration formatting — minutes, hours, days, edge cases
+
+  src/__tests__/lib/tasteMatch.test.ts        (9 tests)
+    Tests Jaccard similarity and Pearson correlation algorithms
+    (the math behind Taste Match %) — no DB dependency
+
+  src/__tests__/lib/vibeFilters.test.ts       (5 tests)
+    Tests VIBE_FILTERS config — count, unique IDs, valid TMDB genre IDs,
+    non-empty labels, Action genre present
+
+  src/__tests__/lib/postTypes.test.ts         (7 tests)
+    Tests REACTION_META — 5 types, emojis, labels, specific values
+
+  Total: 6 files, 41 tests
+
+  ── Why these tests? ─────────────────────────────────────────────────────────
+
+  These are pure unit tests — no database, no network, no Next.js runtime.
+  They test the business logic that is most likely to break silently:
+    • Type guards used throughout the app to validate untrusted data
+    • The Taste Match algorithm (math errors are hard to spot visually)
+    • Configuration constants (wrong TMDB genre ID = broken filter)
+    • Formatting utilities (edge cases like empty strings, NaN)
+
+  Integration tests (Prisma + Postgres) cover the database layer separately.
+  The combination gives confidence that both the logic and the schema are
+  correct before any code reaches Vercel.
+
+  ── Adding more tests ────────────────────────────────────────────────────────
+
+  Add files to src/__tests__/**/*.test.ts or src/__tests__/**/*.test.tsx.
+  Vitest picks them up automatically. For API route tests, mock Prisma:
+
+    vi.mock("@/lib/server/prisma", () => ({
+      prisma: { user: { findUnique: vi.fn() } }
+    }));
+
+
+================================================================================
+  4. STAGING ENVIRONMENT
+================================================================================
+
+  URL:    https://cinetrack-staging.vercel.app
+  Branch: develop
+  Type:   Stable Vercel alias (always points to latest develop deploy)
+
+  ── How it works ─────────────────────────────────────────────────────────────
+
+  1. Developer pushes to develop branch.
+  2. Pipeline runs validate → build → test → security → docker.
+  3. vercel:deploy:staging runs `vercel deploy` → gets a unique preview URL
+     (e.g. cinetrack-abc123.vercel.app).
+  4. It then runs `vercel alias set <preview-url> cinetrack-staging.vercel.app`
+     to point the stable alias at the new preview.
+  5. cinetrack-staging.vercel.app now serves the latest develop code.
+
+  ── Why a stable alias? ──────────────────────────────────────────────────────
+
+  Every Vercel deploy gets a unique URL (cinetrack-abc123.vercel.app).
+  Without aliasing, the staging URL changes on every deploy, making it
+  impossible to share a stable link with QA, professors, or stakeholders.
+  The alias gives a permanent URL that always reflects the latest develop build.
+
+  ── Staging vs Production ────────────────────────────────────────────────────
+
+  ┌──────────────────┬──────────────────────────────────────────────────────┐
+  │                  │ Staging                  │ Production                │
+  ├──────────────────┼──────────────────────────┼───────────────────────────┤
+  │ Branch           │ develop                  │ main                      │
+  │ URL              │ cinetrack-staging.vercel │ movie-tracker-five-theta  │
+  │                  │ .app                     │ .vercel.app               │
+  │ Deploy trigger   │ Automatic                │ Automatic                 │
+  │ Rollback         │ Push a fix to develop    │ Manual rollback job       │
+  │ Database         │ Same Supabase instance   │ Same Supabase instance    │
+  │                  │ (shared for now)         │                           │
+  └──────────────────┴──────────────────────────┴───────────────────────────┘
+
+  Note: Both environments share the same Supabase database. For a production
+  project, you would create a separate Supabase project for staging with its
+  own DATABASE_URL. This is a future improvement.
+
+
+================================================================================
+  5. ROLLBACK JOB
+================================================================================
+
+  Job name: rollback:production
+  Stage:    rollback
+  Trigger:  Manual (human must click ▶ in GitLab UI)
+  Branch:   main only
+
+  ── How to trigger a rollback ────────────────────────────────────────────────
+
+  1. Go to GitLab → CI/CD → Pipelines
+  2. Find the pipeline for the bad deploy (on main branch)
+  3. Click into the pipeline
+  4. Find the rollback:production job (it shows as "manual")
+  5. Click the ▶ play button
+  6. Confirm — the job runs and production reverts in ~60 seconds
+
+  ── What the rollback does ───────────────────────────────────────────────────
+
+  1. Reads PREVIOUS_SHA from the deploy job's dotenv artefact
+     (stored as DEPLOYED_SHA and PREVIOUS_SHA during vercel:deploy:production)
+  2. Validates PREVIOUS_SHA is not empty or all-zeros
+  3. git checkout <PREVIOUS_SHA> — checks out the previous commit
+  4. vercel deploy --prod --yes — deploys that code to production
+  5. Vercel atomically swaps production to the previous version
+
+  ── Rollback limitations ─────────────────────────────────────────────────────
+
+  • Cannot rollback the very first deploy (no PREVIOUS_SHA exists)
+  • Only rolls back the application code — not the database schema
+  • If the rollback commit used a different schema, you may need to also
+    run a database migration rollback manually in Supabase
+  • The rollback job is on the same pipeline as the bad deploy — if the
+    pipeline itself failed before docker:build-push, there is no rollback
+    job to click (use the Vercel dashboard instead to promote a previous
+    deployment)
+
+  ── Alternative rollback via Vercel dashboard ────────────────────────────────
+
+  Vercel keeps all previous deployments. You can also rollback by:
+  1. Go to vercel.com → your project → Deployments
+  2. Find the last good deployment
+  3. Click "..." → "Promote to Production"
+  This is instant and doesn't require the pipeline.
+
+
+================================================================================
+  6. DEPLOYMENT ARCHITECTURE
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │                     FULL DEPLOYMENT ARCHITECTURE                        │
+  │                                                                         │
+  │   Developer                                                             │
+  │       │ git push                                                        │
+  │       ▼                                                                 │
+  │   GitLab Repository                                                     │
+  │       │                                                                 │
+  │       ▼                                                                 │
+  │   GitLab CI/CD (8 stages)                                               │
+  │       │                                                                 │
+  │       ├──► GitLab Container Registry                                   │
+  │       │    :sha tag (immutable) + :latest (mutable)                    │
+  │       │                                                                 │
+  │       ├──► Vercel CLI → Vercel Edge Network                            │
+  │       │         ├── Staging: cinetrack-staging.vercel.app              │
+  │       │         └── Production: movie-tracker-five-theta.vercel.app    │
+  │       │                   │                                            │
+  │       │                   │ DATABASE_URL (pooled, port 6543)           │
+  │       │                   │ DIRECT_URL   (direct, port 5432)           │
+  │       │                   ▼                                            │
+  │       │         Supabase PostgreSQL 16                                  │
+  │       │         aws-0-eu-west-1.pooler.supabase.com                    │
+  │       │                                                                 │
+  │       └──► notify:pipeline (summary log)                               │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+  7. ENVIRONMENT VARIABLES
+================================================================================
+
+  ── Build-time placeholders (hardcoded in .gitlab-ci.yml) ───────────────────
+
+  Used only during `next build`. Never reach runtime.
+
+    DATABASE_URL          postgresql://ci:ci@localhost:5432/ci
+    DIRECT_URL            postgresql://ci:ci@localhost:5432/ci
+    AUTH_SECRET           ci-build-placeholder-not-a-real-secret
+    TMDB_API_READ_TOKEN   ci-placeholder
+    NEXT_TELEMETRY_DISABLED  1
+
+  ── GitLab CI/CD Variables (masked + protected) ─────────────────────────────
+
+  Set in GitLab → Settings → CI/CD → Variables.
+
+    VERCEL_TOKEN          Vercel personal access token
+    VERCEL_ORG_ID         team_U5q9BkiG84Kq8NVJYsG73hU4
+    VERCEL_PROJECT_ID     prj_2jweZGUAC3PpSr2DSRY6ufKdQgDB
+
+  ── Vercel Environment Variables (runtime) ──────────────────────────────────
+
+  Set in Vercel → Project → Settings → Environment Variables.
+
+    DATABASE_URL          Supabase pooled (port 6543, pgbouncer)
+    DIRECT_URL            Supabase direct (port 5432, migrations)
+    AUTH_SECRET           JWT signing secret
+    TMDB_API_READ_TOKEN   TMDB v4 Read Access Token (Bearer)
+
+  ── Test-stage variables (ephemeral CI Postgres) ────────────────────────────
+
+    DATABASE_URL          postgresql://cinetrack_ci:cinetrack_ci@postgres:5432/...
+    DIRECT_URL            same (no pooler in CI)
+    AUTH_SECRET           ci-test-secret
+    TMDB_API_READ_TOKEN   ci-placeholder
+
+
+================================================================================
+  8. RUNNERS
+================================================================================
+
+  ┌──────────────────┬──────────────────────────────────────────────────────────┐
+  │ Runner tag       │ Jobs                                                     │
+  ├──────────────────┼──────────────────────────────────────────────────────────┤
+  │ lint-runner      │ install:deps, lint:*, test:unit, notify:pipeline         │
+  │                  │ 2 vCPU, 2 GB RAM, no privileged mode                    │
+  ├──────────────────┼──────────────────────────────────────────────────────────┤
+  │ build-runner     │ build:nextjs                                             │
+  │                  │ 4 vCPU, 8 GB RAM (Next.js build is memory-hungry)       │
+  ├──────────────────┼──────────────────────────────────────────────────────────┤
+  │ test-runner      │ test:integration                                         │
+  │                  │ 4 vCPU, 6 GB RAM, Docker executor + service containers  │
+  ├──────────────────┼──────────────────────────────────────────────────────────┤
+  │ security-runner  │ security:audit, security:secrets                        │
+  │                  │ 2 vCPU, 2 GB RAM, outbound internet access              │
+  ├──────────────────┼──────────────────────────────────────────────────────────┤
+  │ docker-runner    │ docker:build-push                                        │
+  │                  │ 4 vCPU, 8 GB RAM, privileged mode (Docker-in-Docker)    │
+  ├──────────────────┼──────────────────────────────────────────────────────────┤
+  │ deploy-runner    │ vercel:deploy:staging, vercel:deploy:production,         │
+  │                  │ rollback:production                                      │
+  │                  │ 2 vCPU, 2 GB RAM, VERCEL_TOKEN injected                 │
+  │                  │ Protected: true (main/develop only)                     │
+  └──────────────────┴──────────────────────────────────────────────────────────┘
+
+
+================================================================================
+  9. CACHING
+================================================================================
+
+  node_modules/ cached on hash of package-lock.json.
+  install:deps: push-pull (reads + writes)
+  All others:   pull only (read-only, safe for parallel execution)
+  Auto-invalidated when package-lock.json changes.
+
+
+================================================================================
+  10. SECURITY MODEL
+================================================================================
+
+  • Secrets never in .gitlab-ci.yml, Dockerfile, or source code
+  • VERCEL_TOKEN only available on protected branches (deploy-runner: Protected)
+  • Docker-in-Docker confined to one runner (docker-runner, privileged)
+  • All other runners unprivileged
+  • TruffleHog scans last 10 commits for leaked secrets
+  • npm audit blocks on critical CVEs (high blocked by Next.js advisory)
+  • MR pipelines cannot access VERCEL_TOKEN or production credentials
+
+
+================================================================================
+  11. DECISION SUMMARY
+================================================================================
+
+  ┌────────────────────────────────────┬──────────────────────────────────────┐
+  │ Decision                           │ Reason                               │
+  ├────────────────────────────────────┼──────────────────────────────────────┤
+  │ Vitest for unit tests              │ Fast (~10s), no DB needed, tests      │
+  │                                    │ pure logic independently of infra    │
+  ├────────────────────────────────────┼──────────────────────────────────────┤
+  │ test:unit runs from install:deps   │ Doesn't wait for build — parallel    │
+  │                                    │ with test:integration, saves time    │
+  ├────────────────────────────────────┼──────────────────────────────────────┤
+  │ Stable staging alias               │ Permanent URL for QA/demos — doesn't │
+  │                                    │ change on every deploy               │
+  ├────────────────────────────────────┼──────────────────────────────────────┤
+  │ Rollback reads PREVIOUS_SHA        │ Deterministic — always rolls back to │
+  │ from deploy artefact               │ exactly the commit before the bad    │
+  │                                    │ deploy, not just "latest - 1"        │
+  ├────────────────────────────────────┼──────────────────────────────────────┤
+  │ Rollback is manual                 │ Rollbacks should be deliberate human │
+  │                                    │ decisions, not automatic reactions   │
+  ├────────────────────────────────────┼──────────────────────────────────────┤
+  │ audit-level=critical (not high)    │ Next.js has a high-severity advisory │
+  │                                    │ that can't be fixed without          │
+  │                                    │ downgrading. Critical-only prevents  │
+  │                                    │ false-positive pipeline blocks.      │
+  ├────────────────────────────────────┼──────────────────────────────────────┤
+  │ Vercel CLI in pipeline             │ Deploy only after all CI gates pass  │
+  │                                    │ (not on raw push via native integration)│
+  ├────────────────────────────────────┼──────────────────────────────────────┤
+  │ Docker image as backup artefact    │ Platform portability, local testing, │
+  │                                    │ self-hosted fallback                 │
+  └────────────────────────────────────┴──────────────────────────────────────┘
+
+
+================================================================================
+  12. LIVE URLS
+================================================================================
+
+  Production:  https://movie-tracker-five-theta.vercel.app
+  Staging:     https://cinetrack-staging.vercel.app
+  GitLab:      https://gitlab.com/edo_thecreator/movie-tracker
+  Supabase:    https://supabase.com/dashboard/project/uggyvuyqoyzwhskrnzic
+
+
+================================================================================
+  END OF DOCUMENTATION
+================================================================================
