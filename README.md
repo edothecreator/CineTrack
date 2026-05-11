@@ -1,5 +1,10 @@
 # 🎬 CineTrack
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Visit%20Site-brightgreen?style=for-the-badge)](https://movie-tracker-five-theta.vercel.app)
+[![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
+[![Next.js](https://img.shields.io/badge/Next.js-16-black?style=for-the-badge&logo=next.js)](https://nextjs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=for-the-badge&logo=typescript)](https://typescriptlang.org)
+
 **Spotify Wrapped meets Letterboxd — a social platform for people who treat watching as a lifestyle, not a pastime.**
 
 Stop wasting 30 minutes deciding what to watch. Stop losing track of shows mid-season. CineTrack turns passive watching into identity — track your taste, see how it evolves, and find people who get your vibe.
