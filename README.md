@@ -60,47 +60,30 @@ A full-stack movie and TV show tracking platform built with Next.js 16, React 19
 
 ---
 
-## Getting Started
+## Live Demo
 
-### Prerequisites
+🔗 **[movie-tracker-five-theta.vercel.app](https://movie-tracker-five-theta.vercel.app/)**
 
-- Node.js 20+
-- PostgreSQL (or use Docker)
-- TMDB API key ([get one here](https://www.themoviedb.org/settings/api))
+---
 
-### Setup
+## Running Locally
+
+If you want to run the project locally for development:
 
 ```bash
-# Clone the repo
 git clone https://github.com/edothecreator/CineTrack.git
 cd CineTrack
-
-# Install dependencies
 npm install
-
-# Set up environment variables
-cp .env.example .env
-# Edit .env with your database URL and API keys
-
-# Run database migrations
+cp .env.example .env   # add your DB URL and API keys
 npx prisma migrate deploy
-
-# Seed demo data (optional)
-node scripts/seed-demo.mjs
-
-# Start development server
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000)
-
-### Docker
+Or with Docker:
 
 ```bash
 docker-compose up --build
 ```
-
-This spins up the app + PostgreSQL. The app will be available on port 3000.
 
 ---
 
